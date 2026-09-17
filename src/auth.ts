@@ -1,7 +1,7 @@
 import 'aws-amplify/auth/enable-oauth-listener'
 import { Amplify } from 'aws-amplify'
 import {
-  fetchUserAttributes,
+  fetchAuthSession,
   getCurrentUser,
   signInWithRedirect,
   signOut,
@@ -66,8 +66,12 @@ export type PortalUser = {
 export async function getPortalUser(): Promise<PortalUser | null> {
   try {
     const currentUser = await getCurrentUser()
-    const attributes = await fetchUserAttributes()
-    const email = attributes.email ?? currentUser.username
+    const session = await fetchAuthSession()
+    const tokenEmail = session.tokens?.idToken?.payload.email
+    const email =
+      typeof tokenEmail === 'string'
+        ? tokenEmail
+        : currentUser.signInDetails?.loginId ?? currentUser.username
     const initials = email.slice(0, 2).toUpperCase()
 
     return { username: currentUser.username, email, initials }

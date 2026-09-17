@@ -72,6 +72,10 @@ function App() {
     const currentUser = await getPortalUser()
     setUser(currentUser)
     setAuthStatus(currentUser ? 'signed-in' : 'signed-out')
+
+    if (currentUser && window.location.pathname === '/auth/callback') {
+      window.history.replaceState({}, document.title, '/')
+    }
   }
 
   useEffect(() => {
