@@ -1,0 +1,10 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "ao-media-portal-api-prod"
+resolve_s3 = true
+s3_prefix = "ao-media-portal-api-prod"
+region = "us-west-2"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+parameter_overrides = "BucketName=\"aorafting-media-library-prod-543872465939-us-west-2-an\" UserPoolId=\"us-west-2_CGSGfnrmt\" UserPoolClientId=\"25eqamg53fjhvppqhk36s94jih\""

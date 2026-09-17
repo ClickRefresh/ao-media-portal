@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Cognito-protected API for the AO Media Portal private S3 library.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: aorafting-media-library-prod-543872465939-us-west-2-an
+  UserPoolId:
+    Type: String
+    Default: us-west-2_CGSGfnrmt
+  UserPoolClientId:
+    Type: String
+    Default: 25eqamg53fjhvppqhk36s94jih
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 15
+    MemorySize: 512
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        BUCKET_NAME: !Ref BucketName
+
+Resources:
+  MediaApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - https://media.aorafting.net
+          - http://localhost:5173
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        MaxAge: 600
+      Auth:
+        DefaultAuthorizer: CognitoJwtAuthorizer
+        Authorizers:
+          CognitoJwtAuthorizer:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              audience:
+                - !Ref UserPoolClientId
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}
+
+  MediaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/index.handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref BucketName
+        - S3WritePolicy:
+            BucketName: !Ref BucketName
+      Events:
+        ListMedia:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MediaApi
+            Path: /media
+            Method: GET
+        CreateUpload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MediaApi
+            Path: /media/upload
+            Method: POST
+        CreateDownload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MediaApi
+            Path: /media/download
+            Method: GET
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints:
+          - src/index.ts
+        Minify: true
+        Sourcemap: true
+        Target: es2022
+
+Outputs:
+  MediaApiUrl:
+    Description: Set this value as VITE_API_BASE_URL in the portal.
+    Value: !Sub https://${MediaApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}

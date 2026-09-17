@@ -1,0 +1,12 @@
+[
+  {
+    "AllowedHeaders": ["*"],
+    "AllowedMethods": ["GET", "HEAD", "POST"],
+    "AllowedOrigins": [
+      "https://media.aorafting.net",
+      "http://localhost:5173"
+    ],
+    "ExposeHeaders": ["ETag", "x-amz-version-id"],
+    "MaxAgeSeconds": 600
+  }
+]

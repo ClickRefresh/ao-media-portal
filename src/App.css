@@ -77,6 +77,7 @@
 .media-card.selected { border-color: #60937d; box-shadow: 0 0 0 2px rgba(63,117,91,.14); }
 .media-preview { position: relative; aspect-ratio: 16/9; overflow: hidden; background: #dce4df; }
 .media-preview img { width: 100%; height: 100%; display: block; object-fit: cover; transition: transform .35s ease; }
+.media-preview video { width: 100%; height: 100%; display: block; object-fit: cover; background: #20332e; }
 .media-card:hover .media-preview img { transform: scale(1.025); }
 .select-control { position: absolute; top: 10px; left: 10px; }
 .select-control input { position: absolute; opacity: 0; }
@@ -133,6 +134,9 @@
 .file-queue button { color: #75807d; background: transparent; border: 0; }
 .upload-note { display: flex; align-items: flex-start; gap: 9px; margin-top: 13px; padding: 10px 11px; color: #5a6f67; background: #edf4ef; border-radius: 8px; font-size: 10px; line-height: 1.45; }
 .upload-note svg { flex: none; }
+.upload-error { margin: 10px 0 0; padding: 9px 11px; color: #8f2025; background: #fff0f0; border-radius: 8px; font-size: 11px; }
+.storage-error { min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px 20px; color: #7d272b; background: #fff0f0; border-bottom: 1px solid #efcecf; font-size: 12px; }
+.storage-error button { padding: 5px 9px; color: #7d272b; background: #fff; border: 1px solid #e3bfc1; border-radius: 6px; font-weight: 700; }
 .upload-modal footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .upload-modal footer button { min-height: 38px; padding: 0 14px; border-radius: 8px; font-size: 11px; font-weight: 700; }
 .upload-modal footer .secondary { color: #53605d; background: #fff; border: 1px solid #d9ded9; }

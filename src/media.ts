@@ -2,6 +2,7 @@ export type MediaKind = 'photo' | 'video'
 
 export type MediaItem = {
   id: string
+  key?: string
   name: string
   kind: MediaKind
   src: string

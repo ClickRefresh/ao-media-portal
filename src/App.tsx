@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive,
   ChevronDown,
@@ -34,6 +34,7 @@ import {
   getPortalUser,
   type PortalUser,
 } from './auth'
+import { listMedia, mediaApiConfigured, uploadMedia } from './api'
 import { collections, initialMedia, type MediaItem, type MediaKind } from './media'
 import './App.css'
 
@@ -67,6 +68,8 @@ function App() {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [storageLoading, setStorageLoading] = useState(false)
+  const [storageError, setStorageError] = useState<string | null>(null)
 
   const refreshUser = async () => {
     const currentUser = await getPortalUser()
@@ -91,6 +94,25 @@ function App() {
     })
     return unsubscribe
   }, [])
+
+  const refreshMedia = useCallback(async () => {
+    if (!mediaApiConfigured) return
+    setStorageLoading(true)
+    setStorageError(null)
+    try {
+      setMedia(await listMedia())
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to load S3 media.')
+    } finally {
+      setStorageLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    // The S3 library is external state and is synchronized after authentication.
+    // oxlint-disable-next-line react/set-state-in-effect
+    if (authStatus === 'signed-in') void refreshMedia()
+  }, [authStatus, refreshMedia])
 
   const visibleMedia = useMemo(() => {
     const normalized = query.trim().toLowerCase()
@@ -215,6 +237,9 @@ function App() {
         {authStatus === 'demo' && (
           <div className="preview-banner"><Sparkles size={16} /><span><strong>Preview mode</strong> — changes stay in this browser until the S3 API is connected.</span></div>
         )}
+        {storageError && (
+          <div className="storage-error"><span>{storageError}</span><button onClick={() => void refreshMedia()}>Try again</button></div>
+        )}
 
         <section className="content-area">
           {section === 'Library' || section === 'Favorites' ? (
@@ -228,7 +253,7 @@ function App() {
               <div className="section-heading">
                 <div>
                   <h2>{section === 'Favorites' ? 'Favorite media' : 'All media'}</h2>
-                  <p>{visibleMedia.length} items shown · Updated moments ago</p>
+                  <p>{storageLoading ? 'Loading private S3 library…' : `${visibleMedia.length} items shown · Updated moments ago`}</p>
                 </div>
                 <div className="media-tools">
                   <div className="filter-tabs" role="group" aria-label="Filter by media type">
@@ -280,9 +305,16 @@ function App() {
 
       {uploadOpen && (
         <UploadModal
+          connected={mediaApiConfigured}
           onClose={() => setUploadOpen(false)}
           onAdd={(items) => {
             setMedia((current) => [...items, ...current])
+            setUploadOpen(false)
+            setSection('Library')
+          }}
+          onUpload={async (files) => {
+            for (const file of files) await uploadMedia(file)
+            await refreshMedia()
             setUploadOpen(false)
             setSection('Library')
           }}
@@ -300,7 +332,7 @@ function MediaCard({ item, listView, selected, onSelect, onFavorite }: { item: M
   return (
     <article className={`media-card ${selected ? 'selected' : ''}`}>
       <div className="media-preview">
-        <img src={item.src} alt="" />
+        {item.kind === 'video' ? <video src={item.src} muted preload="metadata" /> : <img src={item.src} alt="" />}
         <label className="select-control"><input type="checkbox" checked={selected} onChange={onSelect} /><span /></label>
         <button className={`favorite-button ${item.favorite ? 'active' : ''}`} onClick={onFavorite} aria-label={item.favorite ? 'Remove from favorites' : 'Add to favorites'}><Heart size={17} fill={item.favorite ? 'currentColor' : 'none'} /></button>
         {item.kind === 'video' && <span className="video-badge"><Play size={13} fill="currentColor" /> Video</span>}
@@ -314,10 +346,12 @@ function MediaCard({ item, listView, selected, onSelect, onFavorite }: { item: M
   )
 }
 
-function UploadModal({ onClose, onAdd }: { onClose: () => void; onAdd: (items: MediaItem[]) => void }) {
+function UploadModal({ connected, onClose, onAdd, onUpload }: { connected: boolean; onClose: () => void; onAdd: (items: MediaItem[]) => void; onUpload: (files: File[]) => Promise<void> }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [dragging, setDragging] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const addFiles = (incoming: FileList | null) => {
     if (!incoming) return
@@ -340,6 +374,18 @@ function UploadModal({ onClose, onAdd }: { onClose: () => void; onAdd: (items: M
     onAdd(items)
   }
 
+  const submitFiles = async () => {
+    if (!connected) return addToPreview()
+    setUploading(true)
+    setError(null)
+    try {
+      await onUpload(files)
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'Upload failed.')
+      setUploading(false)
+    }
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose() }}>
       <section className="upload-modal" role="dialog" aria-modal="true" aria-labelledby="upload-title">
@@ -357,8 +403,9 @@ function UploadModal({ onClose, onAdd }: { onClose: () => void; onAdd: (items: M
           <input ref={inputRef} type="file" accept="image/*,video/*" multiple hidden onChange={(event) => addFiles(event.target.files)} />
         </div>
         {files.length > 0 && <div className="file-queue">{files.map((file, index) => <div key={`${file.name}-${index}`}><FileImage size={17} /><span><strong>{file.name}</strong><small>{Math.max(file.size / 1024 / 1024, 0.1).toFixed(1)} MB</small></span><button onClick={() => setFiles((current) => current.filter((_, fileIndex) => fileIndex !== index))}><X size={16} /></button></div>)}</div>}
-        <div className="upload-note"><ShieldCheck size={17} /><span>Preview mode keeps selected files in this browser. Production uploads will go directly to private S3 storage.</span></div>
-        <footer><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!files.length} onClick={addToPreview}>Add {files.length || ''} to preview</button></footer>
+        <div className="upload-note"><ShieldCheck size={17} /><span>{connected ? 'Files upload directly to private S3 storage using a five-minute authorization.' : 'Preview mode keeps selected files in this browser. Configure the media API to enable private S3 uploads.'}</span></div>
+        {error && <p className="upload-error">{error}</p>}
+        <footer><button className="secondary" onClick={onClose} disabled={uploading}>Cancel</button><button className="primary" disabled={!files.length || uploading} onClick={() => void submitFiles()}>{uploading ? 'Uploading…' : connected ? `Upload ${files.length || ''} file${files.length === 1 ? '' : 's'}` : `Add ${files.length || ''} to preview`}</button></footer>
       </section>
     </div>
   )
