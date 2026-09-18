@@ -34,9 +34,18 @@ Resources:
       AttributeDefinitions:
         - AttributeName: fingerprint
           AttributeType: S
+        - AttributeName: key
+          AttributeType: S
       KeySchema:
         - AttributeName: fingerprint
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: key-index
+          KeySchema:
+            - AttributeName: key
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
       SSESpecification:
         SSEEnabled: true
       TimeToLiveSpecification:
@@ -87,6 +96,12 @@ Resources:
             ApiId: !Ref MediaApi
             Path: /media
             Method: GET
+        ListTrash:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MediaApi
+            Path: /media/trash
+            Method: GET
         CreateUpload:
           Type: HttpApi
           Properties:
@@ -98,6 +113,18 @@ Resources:
           Properties:
             ApiId: !Ref MediaApi
             Path: /media/upload/complete
+            Method: POST
+        TrashMedia:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MediaApi
+            Path: /media/trash
+            Method: POST
+        RestoreMedia:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MediaApi
+            Path: /media/restore
             Method: POST
         CreateDownload:
           Type: HttpApi

@@ -65,8 +65,8 @@ const formatBytes = (bytes: number) => {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
 }
 
-export async function listMedia(): Promise<MediaItem[]> {
-  const result = await authorizedRequest<{ items: ApiMedia[] }>('/media')
+export async function listMedia(scope: 'library' | 'trash' = 'library'): Promise<MediaItem[]> {
+  const result = await authorizedRequest<{ items: ApiMedia[] }>(scope === 'trash' ? '/media/trash' : '/media')
   return result.items.map((item) => ({
     id: item.key,
     key: item.key,
@@ -126,4 +126,18 @@ export async function getDownloadUrl(key: string): Promise<string> {
     `/media/download?key=${encodeURIComponent(key)}`,
   )
   return result.url
+}
+
+export async function trashMedia(key: string): Promise<void> {
+  await authorizedRequest('/media/trash', {
+    method: 'POST',
+    body: JSON.stringify({ key }),
+  })
+}
+
+export async function restoreMedia(key: string): Promise<void> {
+  await authorizedRequest('/media/restore', {
+    method: 'POST',
+    body: JSON.stringify({ key }),
+  })
 }

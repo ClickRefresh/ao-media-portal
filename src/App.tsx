@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Archive,
   ChevronDown,
   Download,
   FileImage,
@@ -14,6 +13,7 @@ import {
   Menu,
   MoreHorizontal,
   Play,
+  RotateCcw,
   Search,
   Settings,
   ShieldCheck,
@@ -34,7 +34,14 @@ import {
   getPortalUser,
   type PortalUser,
 } from './auth'
-import { listMedia, mediaApiConfigured, uploadMedia } from './api'
+import {
+  getDownloadUrl,
+  listMedia,
+  mediaApiConfigured,
+  restoreMedia,
+  trashMedia,
+  uploadMedia,
+} from './api'
 import { collections, initialMedia, type MediaItem, type MediaKind } from './media'
 import './App.css'
 
@@ -69,6 +76,7 @@ function App() {
   const [media, setMedia] = useState<MediaItem[]>(() =>
     mediaApiConfigured ? [] : initialMedia,
   )
+  const [trashItems, setTrashItems] = useState<MediaItem[]>([])
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState<'all' | MediaKind>('all')
   const [view, setView] = useState<ViewMode>('grid')
@@ -76,6 +84,8 @@ function App() {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [activeMenu, setActiveMenu] = useState<string | null>(null)
+  const [actionLoading, setActionLoading] = useState(false)
   const [storageLoading, setStorageLoading] = useState(false)
   const [storageError, setStorageError] = useState<string | null>(null)
 
@@ -116,21 +126,35 @@ function App() {
     }
   }, [])
 
+  const refreshTrash = useCallback(async () => {
+    if (!mediaApiConfigured) return
+    try {
+      setTrashItems(await listMedia('trash'))
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to load Trash.')
+    }
+  }, [])
+
   useEffect(() => {
     // The S3 library is external state and is synchronized after authentication.
-    // oxlint-disable-next-line react/set-state-in-effect
-    if (authStatus === 'signed-in') void refreshMedia()
-  }, [authStatus, refreshMedia])
+    if (authStatus === 'signed-in') {
+      // oxlint-disable-next-line react/set-state-in-effect
+      void refreshMedia()
+      // oxlint-disable-next-line react/set-state-in-effect
+      void refreshTrash()
+    }
+  }, [authStatus, refreshMedia, refreshTrash])
 
   const visibleMedia = useMemo(() => {
     const normalized = query.trim().toLowerCase()
-    return media.filter((item) => {
+    const sectionItems = section === 'Trash' ? trashItems : media
+    return sectionItems.filter((item) => {
       const matchesSection = section !== 'Favorites' || item.favorite
       const matchesKind = kind === 'all' || item.kind === kind
       const searchable = [item.name, item.collection, ...item.tags].join(' ').toLowerCase()
       return matchesSection && matchesKind && (!normalized || searchable.includes(normalized))
     })
-  }, [kind, media, query, section])
+  }, [kind, media, query, section, trashItems])
   const storedBytes = useMemo(() => media.reduce((total, item) => total + (item.bytes ?? 0), 0), [media])
   const collectionCount = useMemo(() => new Set(media.map((item) => item.collection)).size, [media])
   const sidebarCollections = useMemo(() => {
@@ -163,6 +187,75 @@ function App() {
     })
   }
 
+  const refreshAllMedia = async () => {
+    await Promise.all([refreshMedia(), refreshTrash()])
+  }
+
+  const downloadItem = async (item: MediaItem) => {
+    if (!item.key) return
+    setStorageError(null)
+    setActiveMenu(null)
+    try {
+      const url = await getDownloadUrl(item.key)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = item.name
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to download this file.')
+    }
+  }
+
+  const moveItem = async (item: MediaItem, restore: boolean) => {
+    if (!item.key || actionLoading) return
+    setActionLoading(true)
+    setStorageError(null)
+    setActiveMenu(null)
+    try {
+      if (restore) await restoreMedia(item.key)
+      else await trashMedia(item.key)
+      setSelected((current) => {
+        const next = new Set(current)
+        next.delete(item.id)
+        return next
+      })
+      await refreshAllMedia()
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to move this file.')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const actOnSelected = async (action: 'download' | 'trash' | 'restore') => {
+    const source = section === 'Trash' ? trashItems : media
+    const items = source.filter((item) => selected.has(item.id))
+    if (!items.length || actionLoading) return
+
+    if (action === 'download') {
+      for (const item of items) await downloadItem(item)
+      return
+    }
+
+    setActionLoading(true)
+    setStorageError(null)
+    try {
+      for (const item of items) {
+        if (!item.key) continue
+        if (action === 'restore') await restoreMedia(item.key)
+        else await trashMedia(item.key)
+      }
+      setSelected(new Set())
+      await refreshAllMedia()
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to move the selected files.')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   if (authStatus === 'loading') return <LoadingScreen />
   if (authStatus === 'unconfigured') return <ConfigurationScreen />
   if (authStatus === 'signed-out') return <SignInScreen />
@@ -189,6 +282,8 @@ function App() {
               className={section === label ? 'active' : ''}
               onClick={() => {
                 setSection(label)
+                setSelected(new Set())
+                setActiveMenu(null)
                 setSidebarOpen(false)
               }}
             >
@@ -204,7 +299,7 @@ function App() {
             <button aria-label="Create collection">+</button>
           </div>
           {sidebarCollections.slice(0, 4).map((collection) => (
-            <button key={collection.name} onClick={() => setSection('Collections')}>
+            <button key={collection.name} onClick={() => { setSection('Collections'); setSelected(new Set()); setActiveMenu(null) }}>
               <span className="collection-dot" style={{ background: collection.color }} />
               <span>{collection.name}</span>
               <span className="collection-count">{collection.count}</span>
@@ -218,7 +313,7 @@ function App() {
             <strong>{mediaApiConfigured ? `${formatStorage(storedBytes)} stored` : '48.2 GB of 500 GB'}</strong>
           </div>
           {!mediaApiConfigured && <div className="storage-track"><span /></div>}
-          <button className="team-link" onClick={() => setSection('Team')}>
+          <button className="team-link" onClick={() => { setSection('Team'); setSelected(new Set()); setActiveMenu(null) }}>
             <Users size={18} /> Team & access
           </button>
         </div>
@@ -265,18 +360,20 @@ function App() {
         )}
 
         <section className="content-area">
-          {section === 'Library' || section === 'Favorites' ? (
+          {section === 'Library' || section === 'Favorites' || section === 'Trash' ? (
             <>
-              <div className="summary-row">
-                <SummaryCard icon={FileImage} label="Media files" value={mediaApiConfigured ? String(media.length) : '1,284'} detail={mediaApiConfigured ? 'Private S3 objects' : '62 added this month'} />
-                <SummaryCard icon={FolderClosed} label="Collections" value={mediaApiConfigured ? String(collectionCount) : '18'} detail={mediaApiConfigured ? 'In the current library' : 'Across 10 rivers'} />
-                <SummaryCard icon={HardDrive} label="Storage used" value={mediaApiConfigured ? formatStorage(storedBytes) : '9.6%'} detail={mediaApiConfigured ? 'Current loaded objects' : '48.2 GB of 500 GB'} />
-              </div>
+              {section !== 'Trash' && (
+                <div className="summary-row">
+                  <SummaryCard icon={FileImage} label="Media files" value={mediaApiConfigured ? String(media.length) : '1,284'} detail={mediaApiConfigured ? 'Private S3 objects' : '62 added this month'} />
+                  <SummaryCard icon={FolderClosed} label="Collections" value={mediaApiConfigured ? String(collectionCount) : '18'} detail={mediaApiConfigured ? 'In the current library' : 'Across 10 rivers'} />
+                  <SummaryCard icon={HardDrive} label="Storage used" value={mediaApiConfigured ? formatStorage(storedBytes) : '9.6%'} detail={mediaApiConfigured ? 'Current loaded objects' : '48.2 GB of 500 GB'} />
+                </div>
+              )}
 
               <div className="section-heading">
                 <div>
-                  <h2>{section === 'Favorites' ? 'Favorite media' : 'All media'}</h2>
-                  <p>{storageLoading ? 'Loading private S3 library…' : `${visibleMedia.length} items shown · Updated moments ago`}</p>
+                  <h2>{section === 'Favorites' ? 'Favorite media' : section === 'Trash' ? 'Recoverable media' : 'All media'}</h2>
+                  <p>{storageLoading ? 'Loading private S3 library…' : `${visibleMedia.length} items shown · ${section === 'Trash' ? 'Restore items to return them to the library' : 'Updated moments ago'}`}</p>
                 </div>
                 <div className="media-tools">
                   <div className="filter-tabs" role="group" aria-label="Filter by media type">
@@ -297,8 +394,11 @@ function App() {
               {selected.size > 0 && (
                 <div className="selection-bar">
                   <strong>{selected.size} selected</strong>
-                  <button><Download size={16} /> Download</button>
-                  <button><Archive size={16} /> Move</button>
+                  {section !== 'Trash' && <button disabled={actionLoading} onClick={() => void actOnSelected('download')}><Download size={16} /> Download</button>}
+                  <button disabled={actionLoading} onClick={() => void actOnSelected(section === 'Trash' ? 'restore' : 'trash')}>
+                    {section === 'Trash' ? <RotateCcw size={16} /> : <Trash2 size={16} />}
+                    {section === 'Trash' ? 'Restore' : 'Move to trash'}
+                  </button>
                   <button onClick={() => setSelected(new Set())}>Clear</button>
                 </div>
               )}
@@ -313,6 +413,13 @@ function App() {
                       selected={selected.has(item.id)}
                       onSelect={() => toggleSelected(item.id)}
                       onFavorite={() => toggleFavorite(item.id)}
+                      menuOpen={activeMenu === item.id}
+                      inTrash={section === 'Trash'}
+                      disabled={actionLoading}
+                      onToggleMenu={() => setActiveMenu((current) => current === item.id ? null : item.id)}
+                      onDownload={() => void downloadItem(item)}
+                      onTrash={() => void moveItem(item, false)}
+                      onRestore={() => void moveItem(item, true)}
                     />
                   ))}
                 </div>
@@ -354,7 +461,7 @@ function SummaryCard({ icon: Icon, label, value, detail }: { icon: LucideIcon; l
   return <article className="summary-card"><div className="summary-icon"><Icon size={20} /></div><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></article>
 }
 
-function MediaCard({ item, listView, selected, onSelect, onFavorite }: { item: MediaItem; listView: boolean; selected: boolean; onSelect: () => void; onFavorite: () => void }) {
+function MediaCard({ item, listView, selected, menuOpen, inTrash, disabled, onSelect, onFavorite, onToggleMenu, onDownload, onTrash, onRestore }: { item: MediaItem; listView: boolean; selected: boolean; menuOpen: boolean; inTrash: boolean; disabled: boolean; onSelect: () => void; onFavorite: () => void; onToggleMenu: () => void; onDownload: () => void; onTrash: () => void; onRestore: () => void }) {
   return (
     <article className={`media-card ${selected ? 'selected' : ''}`}>
       <div className="media-preview">
@@ -364,7 +471,19 @@ function MediaCard({ item, listView, selected, onSelect, onFavorite }: { item: M
         {item.kind === 'video' && <span className="video-badge"><Play size={13} fill="currentColor" /> Video</span>}
       </div>
       <div className="media-info">
-        <div className="media-title-row"><div><strong>{item.name}</strong><span>{item.collection}</span></div><button aria-label="More actions"><MoreHorizontal size={19} /></button></div>
+        <div className="media-title-row">
+          <div><strong>{item.name}</strong><span>{item.collection}</span></div>
+          <button aria-label="More actions" aria-expanded={menuOpen} onClick={onToggleMenu}><MoreHorizontal size={19} /></button>
+        </div>
+        {menuOpen && (
+          <div className="media-actions-menu">
+            {!inTrash && <button disabled={disabled} onClick={onDownload}><Download size={15} /> Download</button>}
+            <button disabled={disabled} onClick={inTrash ? onRestore : onTrash}>
+              {inTrash ? <RotateCcw size={15} /> : <Trash2 size={15} />}
+              {inTrash ? 'Restore to library' : 'Move to trash'}
+            </button>
+          </div>
+        )}
         <div className="tag-row">{item.tags.slice(0, listView ? 3 : 2).map((tag) => <span key={tag}>{tag}</span>)}</div>
         <div className="media-meta"><span>{item.dimensions}</span><span>{item.size}</span><span>{item.uploaded}</span></div>
       </div>

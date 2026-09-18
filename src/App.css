@@ -86,13 +86,17 @@
 .favorite-button { position: absolute; top: 9px; right: 9px; width: 31px; height: 31px; display: grid; place-items: center; color: #fff; background: rgba(19,31,28,.52); border: 0; border-radius: 7px; backdrop-filter: blur(8px); }
 .favorite-button.active { color: #ff9d9d; }
 .video-badge { position: absolute; left: 10px; bottom: 10px; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: #fff; background: rgba(17,28,26,.72); border-radius: 6px; font-size: 10px; font-weight: 700; backdrop-filter: blur(8px); }
-.media-info { padding: 13px 14px 12px; }
+.media-info { position: relative; padding: 13px 14px 12px; }
 .media-title-row { display: flex; align-items: flex-start; gap: 10px; }
 .media-title-row > div { min-width: 0; flex: 1; }
 .media-title-row strong, .media-title-row span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .media-title-row strong { color: #263230; font-size: 12px; font-weight: 700; }
 .media-title-row span { margin-top: 3px; color: #788280; font-size: 10px; }
 .media-title-row button { padding: 0; color: #7c8584; background: transparent; border: 0; }
+.media-actions-menu { position: absolute; top: 40px; right: 12px; z-index: 5; width: 165px; display: grid; gap: 3px; padding: 6px; background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 12px 30px rgba(22,36,32,.16); }
+.media-actions-menu button { min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 9px; color: #46534f; background: transparent; border: 0; border-radius: 6px; text-align: left; font-size: 11px; }
+.media-actions-menu button:hover { background: #f2f5f1; }
+.media-actions-menu button:disabled { cursor: wait; opacity: .5; }
 .tag-row { min-height: 23px; display: flex; gap: 5px; margin: 10px 0; }
 .tag-row span { padding: 3px 7px; color: #64726e; background: #eff2ee; border-radius: 5px; font-size: 9px; font-weight: 600; }
 .media-meta { display: flex; gap: 8px; padding-top: 9px; color: #8a9391; border-top: 1px solid #edf0ec; font-size: 9px; }

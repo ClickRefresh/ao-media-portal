@@ -1,5 +1,7 @@
 import type { APIGatewayProxyHandlerV2WithJWTAuthorizer } from 'aws-lambda'
 import {
+  CopyObjectCommand,
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
@@ -10,6 +12,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
+  QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post'
@@ -23,6 +26,7 @@ const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: { removeUndefinedValues: true },
 })
 const mediaPrefix = 'media/'
+const trashPrefix = 'trash/'
 const maxUploadBytes = 5 * 1024 * 1024 * 1024
 const allowedContentTypes = /^(image\/(jpeg|png|webp|heic|heif)|video\/(mp4|quicktime))$/
 
@@ -36,6 +40,10 @@ type UploadRequest = {
 type CompleteUploadRequest = {
   key?: string
   fingerprint?: string
+}
+
+type MoveMediaRequest = {
+  key?: string
 }
 
 const response = (statusCode: number, body: unknown) => ({
@@ -61,10 +69,16 @@ const requireMetadataTable = () => {
 }
 
 const duplicateResponse = (item: Record<string, unknown>) => response(409, {
-  code: item.status === 'ready' ? 'DUPLICATE' : 'DUPLICATE_PENDING',
+  code: item.status === 'ready'
+    ? 'DUPLICATE'
+    : item.status === 'trashed'
+      ? 'DUPLICATE_TRASHED'
+      : 'DUPLICATE_PENDING',
   message: item.status === 'ready'
     ? 'This file is already in the media library.'
-    : 'An identical file is already being uploaded.',
+    : item.status === 'trashed'
+      ? 'This file already exists in Trash. Restore it instead.'
+      : 'An identical file is already being uploaded.',
   duplicate: {
     key: item.key,
     name: item.originalName,
@@ -72,11 +86,16 @@ const duplicateResponse = (item: Record<string, unknown>) => response(409, {
   },
 })
 
-const listMedia = async () => {
+const displayNameFromKey = (key: string) => {
+  const name = key.split('/').at(-1) ?? key
+  return name.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, '')
+}
+
+const listMedia = async (prefix = mediaPrefix) => {
   const bucket = requireBucket()
   const result = await s3.send(new ListObjectsV2Command({
     Bucket: bucket,
-    Prefix: mediaPrefix,
+    Prefix: prefix,
     MaxKeys: 100,
   }))
 
@@ -85,7 +104,7 @@ const listMedia = async () => {
       .filter((object) => object.Key && object.Size !== 0)
       .map(async (object) => {
         const key = object.Key!
-        const name = key.split('/').at(-1) ?? key
+        const name = displayNameFromKey(key)
         const previewUrl = await getSignedUrl(
           s3,
           new GetObjectCommand({ Bucket: bucket, Key: key }),
@@ -131,7 +150,11 @@ const createUpload = async (body: string | undefined, subject: string) => {
     ConsistentRead: true,
   }))
   const nowEpoch = Math.floor(Date.now() / 1000)
-  if (existing.Item && (existing.Item.status === 'ready' || Number(existing.Item.expiresAt) > nowEpoch)) {
+  if (existing.Item && (
+    existing.Item.status === 'ready'
+    || existing.Item.status === 'trashed'
+    || Number(existing.Item.expiresAt) > nowEpoch
+  )) {
     return duplicateResponse(existing.Item)
   }
 
@@ -226,9 +249,83 @@ const completeUpload = async (body: string | undefined) => {
   return response(200, { key, fingerprint })
 }
 
+const metadataForKey = async (key: string) => {
+  const result = await dynamodb.send(new QueryCommand({
+    TableName: requireMetadataTable(),
+    IndexName: 'key-index',
+    KeyConditionExpression: '#key = :key',
+    ExpressionAttributeNames: { '#key': 'key' },
+    ExpressionAttributeValues: { ':key': key },
+    Limit: 1,
+  }))
+  return result.Items?.[0]
+}
+
+const copySource = (bucket: string, key: string) =>
+  `${bucket}/${encodeURIComponent(key).replace(/%2F/g, '/')}`
+
+const moveMedia = async (body: string | undefined, restore: boolean) => {
+  const bucket = requireBucket()
+  const tableName = requireMetadataTable()
+  const input = JSON.parse(body ?? '{}') as MoveMediaRequest
+  const sourceKey = input.key ?? ''
+  const sourcePrefix = restore ? trashPrefix : mediaPrefix
+
+  if (!sourceKey.startsWith(sourcePrefix) || sourceKey.includes('..')) {
+    return response(400, { message: 'Invalid media key.' })
+  }
+
+  const metadata = await metadataForKey(sourceKey)
+  if (!metadata?.fingerprint) {
+    return response(404, { message: 'Media metadata was not found.' })
+  }
+
+  const destinationKey = restore
+    ? String(metadata.originalKey ?? sourceKey.replace(trashPrefix, mediaPrefix))
+    : sourceKey.replace(mediaPrefix, trashPrefix)
+
+  await s3.send(new CopyObjectCommand({
+    Bucket: bucket,
+    CopySource: copySource(bucket, sourceKey),
+    Key: destinationKey,
+  }))
+  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: sourceKey }))
+
+  if (restore) {
+    await dynamodb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { fingerprint: metadata.fingerprint },
+      UpdateExpression: 'SET #status = :ready, #key = :destination REMOVE trashedAt, originalKey',
+      ConditionExpression: '#key = :source',
+      ExpressionAttributeNames: { '#status': 'status', '#key': 'key' },
+      ExpressionAttributeValues: {
+        ':ready': 'ready',
+        ':destination': destinationKey,
+        ':source': sourceKey,
+      },
+    }))
+  } else {
+    await dynamodb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { fingerprint: metadata.fingerprint },
+      UpdateExpression: 'SET #status = :trashed, #key = :destination, originalKey = :source, trashedAt = :trashedAt',
+      ConditionExpression: '#key = :source',
+      ExpressionAttributeNames: { '#status': 'status', '#key': 'key' },
+      ExpressionAttributeValues: {
+        ':trashed': 'trashed',
+        ':destination': destinationKey,
+        ':source': sourceKey,
+        ':trashedAt': new Date().toISOString(),
+      },
+    }))
+  }
+
+  return response(200, { key: destinationKey })
+}
+
 const createDownload = async (key: string | undefined) => {
   const bucket = requireBucket()
-  if (!key?.startsWith(mediaPrefix) || key.includes('..')) {
+  if ((!key?.startsWith(mediaPrefix) && !key?.startsWith(trashPrefix)) || key.includes('..')) {
     return response(400, { message: 'Invalid media key.' })
   }
 
@@ -248,11 +345,14 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
   try {
     const route = event.requestContext.routeKey
     if (route === 'GET /media') return await listMedia()
+    if (route === 'GET /media/trash') return await listMedia(trashPrefix)
     if (route === 'POST /media/upload') {
       const subject = event.requestContext.authorizer?.jwt?.claims.sub ?? 'unknown'
       return await createUpload(event.body, String(subject))
     }
     if (route === 'POST /media/upload/complete') return await completeUpload(event.body)
+    if (route === 'POST /media/trash') return await moveMedia(event.body, false)
+    if (route === 'POST /media/restore') return await moveMedia(event.body, true)
     if (route === 'GET /media/download') {
       return await createDownload(event.queryStringParameters?.key)
     }
