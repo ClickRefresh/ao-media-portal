@@ -66,7 +66,9 @@ function App() {
       : null,
   )
   const [section, setSection] = useState<Section>('Library')
-  const [media, setMedia] = useState<MediaItem[]>(initialMedia)
+  const [media, setMedia] = useState<MediaItem[]>(() =>
+    mediaApiConfigured ? [] : initialMedia,
+  )
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState<'all' | MediaKind>('all')
   const [view, setView] = useState<ViewMode>('grid')
@@ -131,6 +133,20 @@ function App() {
   }, [kind, media, query, section])
   const storedBytes = useMemo(() => media.reduce((total, item) => total + (item.bytes ?? 0), 0), [media])
   const collectionCount = useMemo(() => new Set(media.map((item) => item.collection)).size, [media])
+  const sidebarCollections = useMemo(() => {
+    if (!mediaApiConfigured) return collections
+
+    const counts = new Map<string, number>()
+    media.forEach((item) => counts.set(item.collection, (counts.get(item.collection) ?? 0) + 1))
+    const fallbackColors = ['#2d6f92', '#3e6f52', '#985240', '#7e663a']
+
+    return Array.from(counts, ([name, count], index) => ({
+      name,
+      count,
+      color: collections.find((collection) => collection.name === name)?.color
+        ?? fallbackColors[index % fallbackColors.length],
+    }))
+  }, [media])
 
   const toggleFavorite = (id: string) => {
     setMedia((items) =>
@@ -178,7 +194,6 @@ function App() {
             >
               <Icon size={18} />
               <span>{label}</span>
-              {label === 'Uploads' && <span className="nav-count">3</span>}
             </button>
           ))}
         </nav>
@@ -188,7 +203,7 @@ function App() {
             <span className="nav-label">Collections</span>
             <button aria-label="Create collection">+</button>
           </div>
-          {collections.slice(0, 4).map((collection) => (
+          {sidebarCollections.slice(0, 4).map((collection) => (
             <button key={collection.name} onClick={() => setSection('Collections')}>
               <span className="collection-dot" style={{ background: collection.color }} />
               <span>{collection.name}</span>
@@ -200,9 +215,9 @@ function App() {
         <div className="sidebar-footer">
           <div className="storage-label">
             <span>Storage</span>
-            <strong>48.2 GB of 500 GB</strong>
+            <strong>{mediaApiConfigured ? `${formatStorage(storedBytes)} stored` : '48.2 GB of 500 GB'}</strong>
           </div>
-          <div className="storage-track"><span /></div>
+          {!mediaApiConfigured && <div className="storage-track"><span /></div>}
           <button className="team-link" onClick={() => setSection('Team')}>
             <Users size={18} /> Team & access
           </button>
