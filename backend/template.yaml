@@ -87,6 +87,14 @@ Resources:
             BucketName: !Ref BucketName
         - S3WritePolicy:
             BucketName: !Ref BucketName
+        - Statement:
+            - Sid: MoveMediaBetweenLibraryAndTrash
+              Effect: Allow
+              Action:
+                - s3:DeleteObject
+              Resource:
+                - !Sub arn:${AWS::Partition}:s3:::${BucketName}/media/*
+                - !Sub arn:${AWS::Partition}:s3:::${BucketName}/trash/*
         - DynamoDBCrudPolicy:
             TableName: !Ref MediaMetadataTable
       Events:
