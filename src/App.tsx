@@ -50,6 +50,12 @@ const navItems: { label: Section; icon: LucideIcon }[] = [
   { label: 'Trash', icon: Trash2 },
 ]
 
+const formatStorage = (bytes: number) => {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes ? 1 : 0)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
+}
+
 function App() {
   const [authStatus, setAuthStatus] = useState<AuthStatus>(() =>
     demoMode ? 'demo' : cognitoConfigured ? 'loading' : 'unconfigured',
@@ -123,6 +129,8 @@ function App() {
       return matchesSection && matchesKind && (!normalized || searchable.includes(normalized))
     })
   }, [kind, media, query, section])
+  const storedBytes = useMemo(() => media.reduce((total, item) => total + (item.bytes ?? 0), 0), [media])
+  const collectionCount = useMemo(() => new Set(media.map((item) => item.collection)).size, [media])
 
   const toggleFavorite = (id: string) => {
     setMedia((items) =>
@@ -245,9 +253,9 @@ function App() {
           {section === 'Library' || section === 'Favorites' ? (
             <>
               <div className="summary-row">
-                <SummaryCard icon={FileImage} label="Media files" value="1,284" detail="62 added this month" />
-                <SummaryCard icon={FolderClosed} label="Collections" value="18" detail="Across 10 rivers" />
-                <SummaryCard icon={HardDrive} label="Storage used" value="9.6%" detail="48.2 GB of 500 GB" />
+                <SummaryCard icon={FileImage} label="Media files" value={mediaApiConfigured ? String(media.length) : '1,284'} detail={mediaApiConfigured ? 'Private S3 objects' : '62 added this month'} />
+                <SummaryCard icon={FolderClosed} label="Collections" value={mediaApiConfigured ? String(collectionCount) : '18'} detail={mediaApiConfigured ? 'In the current library' : 'Across 10 rivers'} />
+                <SummaryCard icon={HardDrive} label="Storage used" value={mediaApiConfigured ? formatStorage(storedBytes) : '9.6%'} detail={mediaApiConfigured ? 'Current loaded objects' : '48.2 GB of 500 GB'} />
               </div>
 
               <div className="section-heading">

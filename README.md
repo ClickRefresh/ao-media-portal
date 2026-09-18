@@ -49,6 +49,8 @@ The API currently provides:
 5. Copy the `MediaApiUrl` stack output into `VITE_API_BASE_URL` in the frontend environment.
 6. Apply `backend/s3-cors.json` to the bucket's **Permissions → Cross-origin resource sharing (CORS)** setting.
 
+The current production API stack is `ao-media-portal-api-prod`, with endpoint `https://prdd7g3j20.execute-api.us-west-2.amazonaws.com`.
+
 The deployment targets bucket `aorafting-media-library-prod-543872465939-us-west-2-an`, user pool `us-west-2_CGSGfnrmt`, and app client `25eqamg53fjhvppqhk36s94jih`. Change the SAM parameters if any of these resources are renamed.
 
 ## Cognito integration

@@ -56,6 +56,7 @@ export async function listMedia(): Promise<MediaItem[]> {
   return result.items.map((item) => ({
     id: item.key,
     key: item.key,
+    bytes: item.size,
     name: item.name,
     kind: item.kind,
     src: item.previewUrl,
