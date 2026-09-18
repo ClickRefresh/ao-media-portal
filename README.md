@@ -67,6 +67,32 @@ These values are public application identifiers, not AWS credentials. Authentica
 
 Environment files are ignored by Git. Never commit passwords, private keys, AWS access keys, or tokens.
 
+## Cloudflare Pages deployment
+
+The production frontend is designed for Cloudflare Pages with GitHub integration.
+
+- Repository: `ClickRefresh/ao-media-portal`
+- Production branch: `main`
+- Framework preset: React (Vite)
+- Build command: `pnpm build`
+- Build output directory: `dist`
+- Root directory: `/`
+- Node version: pinned to the current Node 22 LTS line by `.node-version`
+
+Add these production environment variables in **Workers & Pages → AO Media Portal → Settings → Environment variables**:
+
+```text
+VITE_COGNITO_USER_POOL_ID=us-west-2_CGSGfnrmt
+VITE_COGNITO_DOMAIN=https://auth.aorafting.net
+VITE_COGNITO_CLIENT_ID=25eqamg53fjhvppqhk36s94jih
+VITE_COGNITO_REDIRECT_URI=https://media.aorafting.net/auth/callback
+VITE_COGNITO_LOGOUT_URI=https://media.aorafting.net/
+VITE_API_BASE_URL=https://prdd7g3j20.execute-api.us-west-2.amazonaws.com
+VITE_DEMO_MODE=false
+```
+
+After the first successful deployment, attach `media.aorafting.net` under **Custom domains**. Cloudflare Pages serves this Vite application as a single-page app, including the Cognito `/auth/callback` route. The security response headers in `public/_headers` are applied by Pages during deployment.
+
 ## Checks
 
 - `pnpm lint`
