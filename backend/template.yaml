@@ -22,8 +22,27 @@ Globals:
     Environment:
       Variables:
         BUCKET_NAME: !Ref BucketName
+        METADATA_TABLE_NAME: !Ref MediaMetadataTable
 
 Resources:
+  MediaMetadataTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: fingerprint
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fingerprint
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
   MediaApi:
     Type: AWS::Serverless::HttpApi
     Properties:
@@ -59,6 +78,8 @@ Resources:
             BucketName: !Ref BucketName
         - S3WritePolicy:
             BucketName: !Ref BucketName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MediaMetadataTable
       Events:
         ListMedia:
           Type: HttpApi
@@ -71,6 +92,12 @@ Resources:
           Properties:
             ApiId: !Ref MediaApi
             Path: /media/upload
+            Method: POST
+        CompleteUpload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MediaApi
+            Path: /media/upload/complete
             Method: POST
         CreateDownload:
           Type: HttpApi
@@ -91,3 +118,6 @@ Outputs:
   MediaApiUrl:
     Description: Set this value as VITE_API_BASE_URL in the portal.
     Value: !Sub https://${MediaApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  MediaMetadataTableName:
+    Description: DynamoDB table containing media fingerprints and metadata.
+    Value: !Ref MediaMetadataTable

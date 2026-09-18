@@ -1,4 +1,5 @@
 import { fetchAuthSession } from 'aws-amplify/auth'
+import { createSHA256 } from 'hash-wasm'
 import type { MediaItem } from './media'
 
 const configuredApiUrl = import.meta.env.VITE_API_BASE_URL?.trim()
@@ -20,8 +21,15 @@ type ApiMedia = {
 
 type UploadAuthorization = {
   key: string
+  fingerprint: string
   url: string
   fields: Record<string, string>
+}
+
+type ApiErrorPayload = {
+  message?: string
+  code?: string
+  duplicate?: { name?: string }
 }
 
 const authorizedRequest = async <T>(path: string, init?: RequestInit): Promise<T> => {
@@ -38,8 +46,14 @@ const authorizedRequest = async <T>(path: string, init?: RequestInit): Promise<T
       ...init?.headers,
     },
   })
-  const payload = await response.json().catch(() => ({}))
+  const payload = await response.json().catch(() => ({})) as ApiErrorPayload
   if (!response.ok) {
+    if (payload.code === 'DUPLICATE' || payload.code === 'DUPLICATE_PENDING') {
+      const existingName = payload.duplicate?.name
+      throw new Error(existingName
+        ? `“${existingName}” is already in the media library.`
+        : payload.message ?? 'This file is already in the media library.')
+    }
     throw new Error(payload.message ?? 'The media service request failed.')
   }
   return payload as T
@@ -75,12 +89,22 @@ export async function listMedia(): Promise<MediaItem[]> {
 }
 
 export async function uploadMedia(file: File): Promise<string> {
+  const hasher = await createSHA256()
+  hasher.init()
+  const chunkSize = 4 * 1024 * 1024
+  for (let offset = 0; offset < file.size; offset += chunkSize) {
+    const chunk = await file.slice(offset, Math.min(offset + chunkSize, file.size)).arrayBuffer()
+    hasher.update(new Uint8Array(chunk))
+  }
+  const fingerprint = hasher.digest('hex')
+
   const authorization = await authorizedRequest<UploadAuthorization>('/media/upload', {
     method: 'POST',
     body: JSON.stringify({
       fileName: file.name,
       contentType: file.type,
       size: file.size,
+      fingerprint,
     }),
   })
 
@@ -89,6 +113,11 @@ export async function uploadMedia(file: File): Promise<string> {
   form.append('file', file)
   const upload = await fetch(authorization.url, { method: 'POST', body: form })
   if (!upload.ok) throw new Error(`S3 rejected ${file.name}.`)
+
+  await authorizedRequest('/media/upload/complete', {
+    method: 'POST',
+    body: JSON.stringify({ key: authorization.key, fingerprint: authorization.fingerprint }),
+  })
   return authorization.key
 }
 

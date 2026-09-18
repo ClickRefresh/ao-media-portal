@@ -336,8 +336,11 @@ function App() {
             setSection('Library')
           }}
           onUpload={async (files) => {
-            for (const file of files) await uploadMedia(file)
-            await refreshMedia()
+            try {
+              for (const file of files) await uploadMedia(file)
+            } finally {
+              await refreshMedia()
+            }
             setUploadOpen(false)
             setSection('Library')
           }}
