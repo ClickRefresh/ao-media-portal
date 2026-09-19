@@ -95,7 +95,7 @@ export async function listMedia(scope: 'library' | 'trash' = 'library'): Promise
   }))
 }
 
-export async function uploadMedia(file: File): Promise<string> {
+export async function uploadMedia(file: File, metadata: MediaMetadataUpdate = {}): Promise<string> {
   const hasher = await createSHA256()
   hasher.init()
   const chunkSize = 4 * 1024 * 1024
@@ -125,6 +125,9 @@ export async function uploadMedia(file: File): Promise<string> {
     method: 'POST',
     body: JSON.stringify({ key: authorization.key, fingerprint: authorization.fingerprint }),
   })
+  if (Object.keys(metadata).length) {
+    await updateMediaMetadata(authorization.key, { displayName: file.name, ...metadata })
+  }
   return authorization.key
 }
 

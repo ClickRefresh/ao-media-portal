@@ -83,6 +83,9 @@ function App() {
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState<'all' | MediaKind>('all')
   const [view, setView] = useState<ViewMode>('grid')
+  const [filterOpen, setFilterOpen] = useState(false)
+  const [collectionFilter, setCollectionFilter] = useState('')
+  const [tagFilter, setTagFilter] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
@@ -155,13 +158,16 @@ function App() {
     return sectionItems.filter((item) => {
       const matchesSection = section !== 'Favorites' || item.favorite
       const matchesCollection = section !== 'Collections' || !activeCollection || item.collection === activeCollection
+      const matchesFilterCollection = !collectionFilter || item.collection === collectionFilter
+      const matchesTag = !tagFilter || item.tags.includes(tagFilter)
       const matchesKind = kind === 'all' || item.kind === kind
       const searchable = [item.name, item.collection, item.caption ?? '', ...item.tags].join(' ').toLowerCase()
-      return matchesSection && matchesCollection && matchesKind && (!normalized || searchable.includes(normalized))
+      return matchesSection && matchesCollection && matchesFilterCollection && matchesTag && matchesKind && (!normalized || searchable.includes(normalized))
     })
-  }, [activeCollection, kind, media, query, section, trashItems])
+  }, [activeCollection, collectionFilter, kind, media, query, section, tagFilter, trashItems])
   const storedBytes = useMemo(() => media.reduce((total, item) => total + (item.bytes ?? 0), 0), [media])
   const collectionCount = useMemo(() => new Set(media.map((item) => item.collection)).size, [media])
+  const availableTags = useMemo(() => Array.from(new Set(media.flatMap((item) => item.tags))).sort(), [media])
   const sidebarCollections = useMemo(() => {
     if (!mediaApiConfigured) return collections
 
@@ -409,7 +415,16 @@ function App() {
                       </button>
                     ))}
                   </div>
-                  <button className="icon-button labeled"><SlidersHorizontal size={17} /> Filter</button>
+                  <div className="filter-wrap">
+                    <button className={`icon-button labeled ${collectionFilter || tagFilter ? 'active' : ''}`} onClick={() => setFilterOpen((open) => !open)} aria-expanded={filterOpen}><SlidersHorizontal size={17} /> Filter</button>
+                    {filterOpen && (
+                      <div className="filter-popover">
+                        <label><span>Collection</span><select value={collectionFilter} onChange={(event) => setCollectionFilter(event.target.value)}><option value="">All collections</option>{sidebarCollections.map((collection) => <option key={collection.name} value={collection.name}>{collection.name}</option>)}</select></label>
+                        <label><span>Tag</span><select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}><option value="">All tags</option>{availableTags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select></label>
+                        <button className="clear-filters" onClick={() => { setCollectionFilter(''); setTagFilter(''); setKind('all') }}>Clear filters</button>
+                      </div>
+                    )}
+                  </div>
                   <div className="view-toggle">
                     <button className={view === 'grid' ? 'active' : ''} onClick={() => setView('grid')} aria-label="Grid view"><Grid2X2 size={17} /></button>
                     <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')} aria-label="List view"><List size={18} /></button>
@@ -463,15 +478,16 @@ function App() {
       {uploadOpen && (
         <UploadModal
           connected={mediaApiConfigured}
+          collectionNames={sidebarCollections.map((collection) => collection.name)}
           onClose={() => setUploadOpen(false)}
           onAdd={(items) => {
             setMedia((current) => [...items, ...current])
             setUploadOpen(false)
             setSection('Library')
           }}
-          onUpload={async (files) => {
+          onUpload={async (files, metadata) => {
             try {
-              for (const file of files) await uploadMedia(file)
+              for (const file of files) await uploadMedia(file, metadata)
             } finally {
               await refreshMedia()
             }
@@ -556,12 +572,15 @@ function MetadataModal({ item, collectionNames, saving, onClose, onSave }: { ite
   )
 }
 
-function UploadModal({ connected, onClose, onAdd, onUpload }: { connected: boolean; onClose: () => void; onAdd: (items: MediaItem[]) => void; onUpload: (files: File[]) => Promise<void> }) {
+function UploadModal({ connected, collectionNames, onClose, onAdd, onUpload }: { connected: boolean; collectionNames: string[]; onClose: () => void; onAdd: (items: MediaItem[]) => void; onUpload: (files: File[], metadata: { collection: string; tags: string[]; caption: string }) => Promise<void> }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [collection, setCollection] = useState('Unsorted uploads')
+  const [tags, setTags] = useState('')
+  const [caption, setCaption] = useState('')
 
   const addFiles = (incoming: FileList | null) => {
     if (!incoming) return
@@ -575,11 +594,12 @@ function UploadModal({ connected, onClose, onAdd, onUpload }: { connected: boole
       name: file.name,
       kind: file.type.startsWith('video/') ? 'video' : 'photo',
       src: URL.createObjectURL(file),
-      collection: 'Unsorted uploads',
+      collection: collection.trim() || 'Unsorted uploads',
       dimensions: file.type.startsWith('video/') ? 'Video preview' : 'Image preview',
       size: `${Math.max(file.size / 1024 / 1024, 0.1).toFixed(1)} MB`,
       uploaded: now,
-      tags: ['new'],
+      tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+      caption: caption.trim(),
     }))
     onAdd(items)
   }
@@ -589,7 +609,11 @@ function UploadModal({ connected, onClose, onAdd, onUpload }: { connected: boole
     setUploading(true)
     setError(null)
     try {
-      await onUpload(files)
+      await onUpload(files, {
+        collection: collection.trim() || 'Unsorted uploads',
+        tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+        caption: caption.trim(),
+      })
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Upload failed.')
       setUploading(false)
@@ -611,6 +635,11 @@ function UploadModal({ connected, onClose, onAdd, onUpload }: { connected: boole
           <p>JPG, PNG, WebP, HEIC, MP4 or MOV</p>
           <button onClick={() => inputRef.current?.click()}>Choose files</button>
           <input ref={inputRef} type="file" accept="image/*,video/*" multiple hidden onChange={(event) => addFiles(event.target.files)} />
+        </div>
+        <div className="upload-details">
+          <label><span>Collection</span><input maxLength={80} list="upload-collection-options" value={collection} onChange={(event) => setCollection(event.target.value)} /><datalist id="upload-collection-options">{collectionNames.map((name) => <option key={name} value={name} />)}</datalist></label>
+          <label><span>Tags <small>Separate with commas</small></span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="rafting, summer, website" /></label>
+          <label className="wide"><span>Caption <small>Applied to every selected file</small></span><textarea rows={2} maxLength={1000} value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Optional context or usage notes…" /></label>
         </div>
         {files.length > 0 && <div className="file-queue">{files.map((file, index) => <div key={`${file.name}-${index}`}><FileImage size={17} /><span><strong>{file.name}</strong><small>{Math.max(file.size / 1024 / 1024, 0.1).toFixed(1)} MB</small></span><button onClick={() => setFiles((current) => current.filter((_, fileIndex) => fileIndex !== index))}><X size={16} /></button></div>)}</div>}
         <div className="upload-note"><ShieldCheck size={17} /><span>{connected ? 'Files upload directly to private S3 storage using a five-minute authorization.' : 'Preview mode keeps selected files in this browser. Configure the media API to enable private S3 uploads.'}</span></div>
