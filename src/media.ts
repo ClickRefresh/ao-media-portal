@@ -12,6 +12,7 @@ export type MediaItem = {
   size: string
   uploaded: string
   tags: string[]
+  caption?: string
   favorite?: boolean
 }
 

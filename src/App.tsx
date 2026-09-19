@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   ChevronDown,
   Download,
@@ -12,6 +12,7 @@ import {
   LogOut,
   Menu,
   MoreHorizontal,
+  Pencil,
   Play,
   RotateCcw,
   Search,
@@ -40,6 +41,7 @@ import {
   mediaApiConfigured,
   restoreMedia,
   trashMedia,
+  updateMediaMetadata,
   uploadMedia,
 } from './api'
 import { collections, initialMedia, type MediaItem, type MediaKind } from './media'
@@ -73,6 +75,7 @@ function App() {
       : null,
   )
   const [section, setSection] = useState<Section>('Library')
+  const [activeCollection, setActiveCollection] = useState<string | null>(null)
   const [media, setMedia] = useState<MediaItem[]>(() =>
     mediaApiConfigured ? [] : initialMedia,
   )
@@ -85,6 +88,7 @@ function App() {
   const [profileOpen, setProfileOpen] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [activeMenu, setActiveMenu] = useState<string | null>(null)
+  const [editItem, setEditItem] = useState<MediaItem | null>(null)
   const [actionLoading, setActionLoading] = useState(false)
   const [storageLoading, setStorageLoading] = useState(false)
   const [storageError, setStorageError] = useState<string | null>(null)
@@ -150,11 +154,12 @@ function App() {
     const sectionItems = section === 'Trash' ? trashItems : media
     return sectionItems.filter((item) => {
       const matchesSection = section !== 'Favorites' || item.favorite
+      const matchesCollection = section !== 'Collections' || !activeCollection || item.collection === activeCollection
       const matchesKind = kind === 'all' || item.kind === kind
-      const searchable = [item.name, item.collection, ...item.tags].join(' ').toLowerCase()
-      return matchesSection && matchesKind && (!normalized || searchable.includes(normalized))
+      const searchable = [item.name, item.collection, item.caption ?? '', ...item.tags].join(' ').toLowerCase()
+      return matchesSection && matchesCollection && matchesKind && (!normalized || searchable.includes(normalized))
     })
-  }, [kind, media, query, section, trashItems])
+  }, [activeCollection, kind, media, query, section, trashItems])
   const storedBytes = useMemo(() => media.reduce((total, item) => total + (item.bytes ?? 0), 0), [media])
   const collectionCount = useMemo(() => new Set(media.map((item) => item.collection)).size, [media])
   const sidebarCollections = useMemo(() => {
@@ -172,10 +177,16 @@ function App() {
     }))
   }, [media])
 
-  const toggleFavorite = (id: string) => {
-    setMedia((items) =>
-      items.map((item) => (item.id === id ? { ...item, favorite: !item.favorite } : item)),
-    )
+  const toggleFavorite = async (item: MediaItem) => {
+    const favorite = !item.favorite
+    setMedia((items) => items.map((current) => current.id === item.id ? { ...current, favorite } : current))
+    if (!item.key || !mediaApiConfigured) return
+    try {
+      await updateMediaMetadata(item.key, { favorite })
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to update this favorite.')
+      await refreshMedia()
+    }
   }
 
   const toggleSelected = (id: string) => {
@@ -256,6 +267,21 @@ function App() {
     }
   }
 
+  const saveMetadata = async (item: MediaItem, updates: { displayName: string; collection: string; tags: string[]; caption: string }) => {
+    if (!item.key || actionLoading) return
+    setActionLoading(true)
+    setStorageError(null)
+    try {
+      await updateMediaMetadata(item.key, updates)
+      await refreshAllMedia()
+      setEditItem(null)
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Unable to save media details.')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   if (authStatus === 'loading') return <LoadingScreen />
   if (authStatus === 'unconfigured') return <ConfigurationScreen />
   if (authStatus === 'signed-out') return <SignInScreen />
@@ -282,6 +308,7 @@ function App() {
               className={section === label ? 'active' : ''}
               onClick={() => {
                 setSection(label)
+                setActiveCollection(null)
                 setSelected(new Set())
                 setActiveMenu(null)
                 setSidebarOpen(false)
@@ -296,10 +323,9 @@ function App() {
         <div className="collection-nav">
           <div className="nav-label-row">
             <span className="nav-label">Collections</span>
-            <button aria-label="Create collection">+</button>
           </div>
           {sidebarCollections.slice(0, 4).map((collection) => (
-            <button key={collection.name} onClick={() => { setSection('Collections'); setSelected(new Set()); setActiveMenu(null) }}>
+            <button key={collection.name} className={section === 'Collections' && activeCollection === collection.name ? 'active' : ''} onClick={() => { setSection('Collections'); setActiveCollection(collection.name); setSelected(new Set()); setActiveMenu(null) }}>
               <span className="collection-dot" style={{ background: collection.color }} />
               <span>{collection.name}</span>
               <span className="collection-count">{collection.count}</span>
@@ -360,9 +386,9 @@ function App() {
         )}
 
         <section className="content-area">
-          {section === 'Library' || section === 'Favorites' || section === 'Trash' ? (
+          {section === 'Library' || section === 'Collections' || section === 'Favorites' || section === 'Trash' ? (
             <>
-              {section !== 'Trash' && (
+              {(section === 'Library' || section === 'Favorites') && (
                 <div className="summary-row">
                   <SummaryCard icon={FileImage} label="Media files" value={mediaApiConfigured ? String(media.length) : '1,284'} detail={mediaApiConfigured ? 'Private S3 objects' : '62 added this month'} />
                   <SummaryCard icon={FolderClosed} label="Collections" value={mediaApiConfigured ? String(collectionCount) : '18'} detail={mediaApiConfigured ? 'In the current library' : 'Across 10 rivers'} />
@@ -372,7 +398,7 @@ function App() {
 
               <div className="section-heading">
                 <div>
-                  <h2>{section === 'Favorites' ? 'Favorite media' : section === 'Trash' ? 'Recoverable media' : 'All media'}</h2>
+                  <h2>{section === 'Favorites' ? 'Favorite media' : section === 'Trash' ? 'Recoverable media' : section === 'Collections' ? activeCollection ?? 'All collections' : 'All media'}</h2>
                   <p>{storageLoading ? 'Loading private S3 library…' : `${visibleMedia.length} items shown · ${section === 'Trash' ? 'Restore items to return them to the library' : 'Updated moments ago'}`}</p>
                 </div>
                 <div className="media-tools">
@@ -412,12 +438,13 @@ function App() {
                       listView={view === 'list'}
                       selected={selected.has(item.id)}
                       onSelect={() => toggleSelected(item.id)}
-                      onFavorite={() => toggleFavorite(item.id)}
+                      onFavorite={() => void toggleFavorite(item)}
                       menuOpen={activeMenu === item.id}
                       inTrash={section === 'Trash'}
                       disabled={actionLoading}
                       onToggleMenu={() => setActiveMenu((current) => current === item.id ? null : item.id)}
                       onDownload={() => void downloadItem(item)}
+                      onEdit={() => { setActiveMenu(null); setEditItem(item) }}
                       onTrash={() => void moveItem(item, false)}
                       onRestore={() => void moveItem(item, true)}
                     />
@@ -453,6 +480,16 @@ function App() {
           }}
         />
       )}
+
+      {editItem && (
+        <MetadataModal
+          item={editItem}
+          collectionNames={sidebarCollections.map((collection) => collection.name)}
+          saving={actionLoading}
+          onClose={() => setEditItem(null)}
+          onSave={(updates) => void saveMetadata(editItem, updates)}
+        />
+      )}
     </div>
   )
 }
@@ -461,13 +498,13 @@ function SummaryCard({ icon: Icon, label, value, detail }: { icon: LucideIcon; l
   return <article className="summary-card"><div className="summary-icon"><Icon size={20} /></div><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></article>
 }
 
-function MediaCard({ item, listView, selected, menuOpen, inTrash, disabled, onSelect, onFavorite, onToggleMenu, onDownload, onTrash, onRestore }: { item: MediaItem; listView: boolean; selected: boolean; menuOpen: boolean; inTrash: boolean; disabled: boolean; onSelect: () => void; onFavorite: () => void; onToggleMenu: () => void; onDownload: () => void; onTrash: () => void; onRestore: () => void }) {
+function MediaCard({ item, listView, selected, menuOpen, inTrash, disabled, onSelect, onFavorite, onToggleMenu, onDownload, onEdit, onTrash, onRestore }: { item: MediaItem; listView: boolean; selected: boolean; menuOpen: boolean; inTrash: boolean; disabled: boolean; onSelect: () => void; onFavorite: () => void; onToggleMenu: () => void; onDownload: () => void; onEdit: () => void; onTrash: () => void; onRestore: () => void }) {
   return (
     <article className={`media-card ${selected ? 'selected' : ''}`}>
       <div className="media-preview">
         {item.kind === 'video' ? <video src={item.src} muted preload="metadata" /> : <img src={item.src} alt="" />}
         <label className="select-control"><input type="checkbox" checked={selected} onChange={onSelect} /><span /></label>
-        <button className={`favorite-button ${item.favorite ? 'active' : ''}`} onClick={onFavorite} aria-label={item.favorite ? 'Remove from favorites' : 'Add to favorites'}><Heart size={17} fill={item.favorite ? 'currentColor' : 'none'} /></button>
+        {!inTrash && <button className={`favorite-button ${item.favorite ? 'active' : ''}`} onClick={onFavorite} aria-label={item.favorite ? 'Remove from favorites' : 'Add to favorites'}><Heart size={17} fill={item.favorite ? 'currentColor' : 'none'} /></button>}
         {item.kind === 'video' && <span className="video-badge"><Play size={13} fill="currentColor" /> Video</span>}
       </div>
       <div className="media-info">
@@ -478,16 +515,44 @@ function MediaCard({ item, listView, selected, menuOpen, inTrash, disabled, onSe
         {menuOpen && (
           <div className="media-actions-menu">
             {!inTrash && <button disabled={disabled} onClick={onDownload}><Download size={15} /> Download</button>}
+            {!inTrash && <button disabled={disabled} onClick={onEdit}><Pencil size={15} /> Edit details</button>}
             <button disabled={disabled} onClick={inTrash ? onRestore : onTrash}>
               {inTrash ? <RotateCcw size={15} /> : <Trash2 size={15} />}
               {inTrash ? 'Restore to library' : 'Move to trash'}
             </button>
           </div>
         )}
+        {item.caption && <p className="media-caption">{item.caption}</p>}
         <div className="tag-row">{item.tags.slice(0, listView ? 3 : 2).map((tag) => <span key={tag}>{tag}</span>)}</div>
         <div className="media-meta"><span>{item.dimensions}</span><span>{item.size}</span><span>{item.uploaded}</span></div>
       </div>
     </article>
+  )
+}
+
+function MetadataModal({ item, collectionNames, saving, onClose, onSave }: { item: MediaItem; collectionNames: string[]; saving: boolean; onClose: () => void; onSave: (updates: { displayName: string; collection: string; tags: string[]; caption: string }) => void }) {
+  const [displayName, setDisplayName] = useState(item.name)
+  const [collection, setCollection] = useState(item.collection)
+  const [tags, setTags] = useState(item.tags.join(', '))
+  const [caption, setCaption] = useState(item.caption ?? '')
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    const cleanTags = tags.split(',').map((tag) => tag.trim()).filter(Boolean)
+    onSave({ displayName: displayName.trim(), collection: collection.trim(), tags: cleanTags, caption: caption.trim() })
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !saving) onClose() }}>
+      <form className="metadata-modal" onSubmit={submit}>
+        <header><div><span className="eyebrow">Library details</span><h2>Edit media</h2></div><button type="button" onClick={onClose} disabled={saving} aria-label="Close editor"><X /></button></header>
+        <label><span>Display name</span><input required maxLength={180} value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
+        <label><span>Collection</span><input required maxLength={80} list="collection-options" value={collection} onChange={(event) => setCollection(event.target.value)} /><datalist id="collection-options">{collectionNames.map((name) => <option key={name} value={name} />)}</datalist></label>
+        <label><span>Tags <small>Separate with commas; up to 10</small></span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="rafting, summer, website" /></label>
+        <label><span>Caption</span><textarea maxLength={1000} rows={4} value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Add context, location, people, or usage notes…" /></label>
+        <footer><button type="button" className="secondary" onClick={onClose} disabled={saving}>Cancel</button><button type="submit" className="primary" disabled={saving || !displayName.trim() || !collection.trim()}>{saving ? 'Saving…' : 'Save details'}</button></footer>
+      </form>
+    </div>
   )
 }
 

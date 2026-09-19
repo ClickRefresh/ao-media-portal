@@ -13,10 +13,15 @@ const apiBaseUrl = configuredApiUrl?.replace(/\/$/, '')
 type ApiMedia = {
   key: string
   name: string
+  originalName: string
   size: number
   uploadedAt: string | null
   kind: 'photo' | 'video'
   previewUrl: string
+  collection: string
+  tags: string[]
+  caption: string
+  favorite: boolean
 }
 
 type UploadAuthorization = {
@@ -74,7 +79,7 @@ export async function listMedia(scope: 'library' | 'trash' = 'library'): Promise
     name: item.name,
     kind: item.kind,
     src: item.previewUrl,
-    collection: 'Unsorted uploads',
+    collection: item.collection,
     dimensions: item.kind === 'video' ? 'Video' : 'Image',
     size: formatBytes(item.size),
     uploaded: item.uploadedAt
@@ -84,7 +89,9 @@ export async function listMedia(scope: 'library' | 'trash' = 'library'): Promise
           year: 'numeric',
         })
       : 'Unknown',
-    tags: ['s3'],
+    tags: item.tags,
+    caption: item.caption,
+    favorite: item.favorite,
   }))
 }
 
@@ -139,5 +146,20 @@ export async function restoreMedia(key: string): Promise<void> {
   await authorizedRequest('/media/restore', {
     method: 'POST',
     body: JSON.stringify({ key }),
+  })
+}
+
+export type MediaMetadataUpdate = {
+  displayName?: string
+  collection?: string
+  tags?: string[]
+  caption?: string
+  favorite?: boolean
+}
+
+export async function updateMediaMetadata(key: string, updates: MediaMetadataUpdate): Promise<void> {
+  await authorizedRequest('/media/metadata', {
+    method: 'PATCH',
+    body: JSON.stringify({ key, ...updates }),
   })
 }

@@ -4,7 +4,6 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
-  ListObjectsV2Command,
   S3Client,
 } from '@aws-sdk/client-s3'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
@@ -44,6 +43,15 @@ type CompleteUploadRequest = {
 
 type MoveMediaRequest = {
   key?: string
+}
+
+type MetadataRequest = {
+  key?: string
+  displayName?: string
+  collection?: string
+  tags?: string[]
+  caption?: string
+  favorite?: boolean
 }
 
 const response = (statusCode: number, body: unknown) => ({
@@ -91,20 +99,24 @@ const displayNameFromKey = (key: string) => {
   return name.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, '')
 }
 
-const listMedia = async (prefix = mediaPrefix) => {
+const listMedia = async (status: 'ready' | 'trashed' = 'ready') => {
   const bucket = requireBucket()
-  const result = await s3.send(new ListObjectsV2Command({
-    Bucket: bucket,
-    Prefix: prefix,
-    MaxKeys: 100,
+  const result = await dynamodb.send(new QueryCommand({
+    TableName: requireMetadataTable(),
+    IndexName: 'status-uploadedAt-index',
+    KeyConditionExpression: '#status = :status',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: { ':status': status },
+    ScanIndexForward: false,
+    Limit: 100,
   }))
 
   const items = await Promise.all(
-    (result.Contents ?? [])
-      .filter((object) => object.Key && object.Size !== 0)
-      .map(async (object) => {
-        const key = object.Key!
-        const name = displayNameFromKey(key)
+    (result.Items ?? [])
+      .filter((item) => typeof item.key === 'string')
+      .map(async (item) => {
+        const key = String(item.key)
+        const originalName = String(item.originalName ?? displayNameFromKey(key))
         const previewUrl = await getSignedUrl(
           s3,
           new GetObjectCommand({ Bucket: bucket, Key: key }),
@@ -113,16 +125,21 @@ const listMedia = async (prefix = mediaPrefix) => {
 
         return {
           key,
-          name,
-          size: object.Size ?? 0,
-          uploadedAt: object.LastModified?.toISOString() ?? null,
-          kind: /\.(mp4|mov)$/i.test(name) ? 'video' : 'photo',
+          name: String(item.displayName ?? originalName),
+          originalName,
+          size: Number(item.size ?? 0),
+          uploadedAt: item.uploadedAt ?? null,
+          kind: String(item.contentType ?? '').startsWith('video/') || /\.(mp4|mov)$/i.test(originalName) ? 'video' : 'photo',
+          collection: String(item.collection ?? 'Unsorted uploads'),
+          tags: Array.isArray(item.tags) ? item.tags.map(String) : [],
+          caption: String(item.caption ?? ''),
+          favorite: Boolean(item.favorite),
           previewUrl,
         }
       }),
   )
 
-  return response(200, { items, nextToken: result.NextContinuationToken ?? null })
+  return response(200, { items, nextToken: result.LastEvaluatedKey ?? null })
 }
 
 const createUpload = async (body: string | undefined, subject: string) => {
@@ -229,14 +246,19 @@ const completeUpload = async (body: string | undefined) => {
     await dynamodb.send(new UpdateCommand({
       TableName: tableName,
       Key: { fingerprint },
-      UpdateExpression: 'SET #status = :ready, uploadedAt = :uploadedAt, etag = :etag REMOVE expiresAt',
+      UpdateExpression: 'SET #status = :ready, uploadedAt = :uploadedAt, etag = :etag, displayName = if_not_exists(displayName, :displayName), #collection = if_not_exists(#collection, :collection), tags = if_not_exists(tags, :tags), favorite = if_not_exists(favorite, :favorite), caption = if_not_exists(caption, :caption) REMOVE expiresAt',
       ConditionExpression: '#key = :key',
-      ExpressionAttributeNames: { '#status': 'status', '#key': 'key' },
+      ExpressionAttributeNames: { '#status': 'status', '#key': 'key', '#collection': 'collection' },
       ExpressionAttributeValues: {
         ':ready': 'ready',
         ':uploadedAt': new Date().toISOString(),
         ':etag': object.ETag ?? '',
         ':key': key,
+        ':displayName': String(object.Metadata?.['original-name'] ?? displayNameFromKey(key)),
+        ':collection': 'Unsorted uploads',
+        ':tags': [],
+        ':favorite': false,
+        ':caption': '',
       },
     }))
   } catch (error) {
@@ -259,6 +281,58 @@ const metadataForKey = async (key: string) => {
     Limit: 1,
   }))
   return result.Items?.[0]
+}
+
+const cleanText = (value: unknown, maxLength: number) =>
+  Array.from(String(value ?? '').normalize('NFKC'))
+    .filter((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127)
+    .join('')
+    .trim()
+    .slice(0, maxLength)
+
+const updateMetadata = async (body: string | undefined) => {
+  const tableName = requireMetadataTable()
+  const input = JSON.parse(body ?? '{}') as MetadataRequest
+  const key = input.key ?? ''
+  if ((!key.startsWith(mediaPrefix) && !key.startsWith(trashPrefix)) || key.includes('..')) {
+    return response(400, { message: 'Invalid media key.' })
+  }
+
+  const existing = await metadataForKey(key)
+  if (!existing?.fingerprint) return response(404, { message: 'Media metadata was not found.' })
+
+  const displayName = cleanText(input.displayName ?? existing.displayName ?? existing.originalName, 180)
+  const collection = cleanText(input.collection ?? existing.collection ?? 'Unsorted uploads', 80)
+  const caption = cleanText(input.caption ?? existing.caption ?? '', 1000)
+  const tags = (input.tags ?? existing.tags ?? [])
+    .map((tag: unknown) => cleanText(tag, 30).toLowerCase())
+    .filter(Boolean)
+    .filter((tag: string, index: number, values: string[]) => values.indexOf(tag) === index)
+    .slice(0, 10)
+
+  if (!displayName || !collection) {
+    return response(400, { message: 'A display name and collection are required.' })
+  }
+
+  const updated = await dynamodb.send(new UpdateCommand({
+    TableName: tableName,
+    Key: { fingerprint: existing.fingerprint },
+    UpdateExpression: 'SET displayName = :displayName, #collection = :collection, tags = :tags, favorite = :favorite, caption = :caption, updatedAt = :updatedAt',
+    ConditionExpression: '#key = :key',
+    ExpressionAttributeNames: { '#collection': 'collection', '#key': 'key' },
+    ExpressionAttributeValues: {
+      ':displayName': displayName,
+      ':collection': collection,
+      ':tags': tags,
+      ':favorite': input.favorite ?? Boolean(existing.favorite),
+      ':caption': caption,
+      ':updatedAt': new Date().toISOString(),
+      ':key': key,
+    },
+    ReturnValues: 'ALL_NEW',
+  }))
+
+  return response(200, { item: updated.Attributes })
 }
 
 const copySource = (bucket: string, key: string) =>
@@ -328,13 +402,15 @@ const createDownload = async (key: string | undefined) => {
   if ((!key?.startsWith(mediaPrefix) && !key?.startsWith(trashPrefix)) || key.includes('..')) {
     return response(400, { message: 'Invalid media key.' })
   }
+  const metadata = await metadataForKey(key)
+  const downloadName = safeFileName(String(metadata?.displayName ?? metadata?.originalName ?? displayNameFromKey(key)))
 
   const url = await getSignedUrl(
     s3,
     new GetObjectCommand({
       Bucket: bucket,
       Key: key,
-      ResponseContentDisposition: `attachment; filename="${safeFileName(key.split('/').at(-1) ?? 'download')}"`,
+      ResponseContentDisposition: `attachment; filename="${downloadName}"`,
     }),
     { expiresIn: 5 * 60 },
   )
@@ -345,7 +421,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
   try {
     const route = event.requestContext.routeKey
     if (route === 'GET /media') return await listMedia()
-    if (route === 'GET /media/trash') return await listMedia(trashPrefix)
+    if (route === 'GET /media/trash') return await listMedia('trashed')
     if (route === 'POST /media/upload') {
       const subject = event.requestContext.authorizer?.jwt?.claims.sub ?? 'unknown'
       return await createUpload(event.body, String(subject))
@@ -353,6 +429,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
     if (route === 'POST /media/upload/complete') return await completeUpload(event.body)
     if (route === 'POST /media/trash') return await moveMedia(event.body, false)
     if (route === 'POST /media/restore') return await moveMedia(event.body, true)
+    if (route === 'PATCH /media/metadata') return await updateMetadata(event.body)
     if (route === 'GET /media/download') {
       return await createDownload(event.queryStringParameters?.key)
     }
