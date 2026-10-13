@@ -1,14 +1,20 @@
 import type { APIGatewayProxyHandlerV2WithJWTAuthorizer } from 'aws-lambda'
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
   CopyObjectCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListPartsCommand,
   S3Client,
+  UploadPartCommand,
 } from '@aws-sdk/client-s3'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -27,6 +33,8 @@ const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
 const mediaPrefix = 'media/'
 const trashPrefix = 'trash/'
 const maxUploadBytes = 5 * 1024 * 1024 * 1024
+const multipartPartSize = 16 * 1024 * 1024
+const multipartReservationSeconds = 7 * 24 * 60 * 60
 const allowedContentTypes = /^(image\/(jpeg|png|webp|heic|heif)|video\/(mp4|quicktime))$/
 
 type UploadRequest = {
@@ -39,6 +47,20 @@ type UploadRequest = {
 type CompleteUploadRequest = {
   key?: string
   fingerprint?: string
+}
+
+type MultipartPartRequest = CompleteUploadRequest & {
+  uploadId?: string
+  partNumber?: number
+}
+
+type MultipartCompleteRequest = CompleteUploadRequest & {
+  uploadId?: string
+  parts?: { partNumber?: number; etag?: string }[]
+}
+
+type MultipartAbortRequest = CompleteUploadRequest & {
+  uploadId?: string
 }
 
 type MoveMediaRequest = {
@@ -224,6 +246,280 @@ const createUpload = async (body: string | undefined, subject: string) => {
   })
 
   return response(200, { key, fingerprint, ...upload })
+}
+
+const multipartPayload = async (item: Record<string, unknown>, resumed: boolean) => {
+  const bucket = requireBucket()
+  const key = String(item.key ?? '')
+  const uploadId = String(item.uploadId ?? '')
+  const listed = await s3.send(new ListPartsCommand({
+    Bucket: bucket,
+    Key: key,
+    UploadId: uploadId,
+    MaxParts: 1000,
+  }))
+
+  return {
+    key,
+    fingerprint: String(item.fingerprint ?? ''),
+    uploadId,
+    partSize: Number(item.partSize ?? multipartPartSize),
+    resumed,
+    uploadedParts: (listed.Parts ?? [])
+      .filter((part) => part.PartNumber && part.ETag)
+      .map((part) => ({
+        partNumber: Number(part.PartNumber),
+        etag: String(part.ETag),
+        size: Number(part.Size ?? 0),
+      })),
+  }
+}
+
+const createMultipartUpload = async (body: string | undefined, subject: string) => {
+  const bucket = requireBucket()
+  const tableName = requireMetadataTable()
+  const input = JSON.parse(body ?? '{}') as UploadRequest
+  const fileName = safeFileName(input.fileName ?? '')
+  const contentType = input.contentType ?? ''
+  const size = Number(input.size)
+  const fingerprint = input.fingerprint?.toLowerCase() ?? ''
+
+  if (!fileName || !allowedContentTypes.test(contentType)) {
+    return response(400, { message: 'Unsupported file type.' })
+  }
+  if (!Number.isFinite(size) || size <= 0 || size > maxUploadBytes) {
+    return response(400, { message: 'Files must be between 1 byte and 5 GB.' })
+  }
+  if (!/^[a-f0-9]{64}$/.test(fingerprint)) {
+    return response(400, { message: 'A valid SHA-256 file fingerprint is required.' })
+  }
+
+  const nowEpoch = Math.floor(Date.now() / 1000)
+  const existing = await dynamodb.send(new GetCommand({
+    TableName: tableName,
+    Key: { fingerprint },
+    ConsistentRead: true,
+  }))
+
+  if (existing.Item && Number(existing.Item.expiresAt) > nowEpoch) {
+    if (
+      existing.Item.status === 'pending'
+      && existing.Item.uploadMode === 'multipart'
+      && existing.Item.uploadedBy === subject
+      && existing.Item.uploadId
+    ) {
+      return response(200, await multipartPayload(existing.Item, true))
+    }
+    return duplicateResponse(existing.Item)
+  }
+  if (existing.Item?.status === 'ready' || existing.Item?.status === 'trashed') {
+    return duplicateResponse(existing.Item)
+  }
+
+  if (existing.Item?.uploadId && existing.Item?.key) {
+    await s3.send(new AbortMultipartUploadCommand({
+      Bucket: bucket,
+      Key: String(existing.Item.key),
+      UploadId: String(existing.Item.uploadId),
+    })).catch(() => undefined)
+  }
+
+  const now = new Date()
+  const key = `${mediaPrefix}${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${randomUUID()}-${fileName}`
+  const created = await s3.send(new CreateMultipartUploadCommand({
+    Bucket: bucket,
+    Key: key,
+    ContentType: contentType,
+    Metadata: {
+      'original-name': fileName,
+      'uploaded-by': subject,
+      sha256: fingerprint,
+    },
+  }))
+  const uploadId = created.UploadId
+  if (!uploadId) throw new Error('S3 did not create a multipart upload session.')
+
+  const reservation = {
+    fingerprint,
+    key,
+    originalName: fileName,
+    contentType,
+    size,
+    uploadedBy: subject,
+    status: 'pending',
+    uploadMode: 'multipart',
+    uploadId,
+    partSize: multipartPartSize,
+    createdAt: now.toISOString(),
+    expiresAt: nowEpoch + multipartReservationSeconds,
+  }
+
+  try {
+    await dynamodb.send(new PutCommand({
+      TableName: tableName,
+      Item: reservation,
+      ConditionExpression: 'attribute_not_exists(fingerprint) OR expiresAt < :now',
+      ExpressionAttributeValues: { ':now': nowEpoch },
+    }))
+  } catch (error) {
+    await s3.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId }))
+      .catch(() => undefined)
+    if ((error as { name?: string }).name !== 'ConditionalCheckFailedException') throw error
+
+    const duplicate = await dynamodb.send(new GetCommand({
+      TableName: tableName,
+      Key: { fingerprint },
+      ConsistentRead: true,
+    }))
+    if (
+      duplicate.Item?.status === 'pending'
+      && duplicate.Item.uploadMode === 'multipart'
+      && duplicate.Item.uploadedBy === subject
+      && duplicate.Item.uploadId
+    ) {
+      return response(200, await multipartPayload(duplicate.Item, true))
+    }
+    return duplicateResponse(duplicate.Item ?? reservation)
+  }
+
+  return response(200, await multipartPayload(reservation, false))
+}
+
+const multipartReservation = async (
+  input: CompleteUploadRequest & { uploadId?: string },
+  subject: string,
+) => {
+  const fingerprint = input.fingerprint?.toLowerCase() ?? ''
+  const key = input.key ?? ''
+  const uploadId = input.uploadId ?? ''
+  if (
+    !key.startsWith(mediaPrefix)
+    || key.includes('..')
+    || !/^[a-f0-9]{64}$/.test(fingerprint)
+    || !uploadId
+  ) {
+    return { error: response(400, { message: 'Invalid multipart upload request.' }) }
+  }
+
+  const result = await dynamodb.send(new GetCommand({
+    TableName: requireMetadataTable(),
+    Key: { fingerprint },
+    ConsistentRead: true,
+  }))
+  const item = result.Item
+  const nowEpoch = Math.floor(Date.now() / 1000)
+  if (
+    !item
+    || item.status !== 'pending'
+    || item.uploadMode !== 'multipart'
+    || item.key !== key
+    || item.uploadId !== uploadId
+    || item.uploadedBy !== subject
+    || Number(item.expiresAt ?? 0) <= nowEpoch
+  ) {
+    return { error: response(409, { message: 'This multipart upload session is no longer valid.' }) }
+  }
+  return { item, fingerprint, key, uploadId }
+}
+
+const createMultipartPart = async (body: string | undefined, subject: string) => {
+  const input = JSON.parse(body ?? '{}') as MultipartPartRequest
+  const reservation = await multipartReservation(input, subject)
+  if (reservation.error) return reservation.error
+  const partNumber = Number(input.partNumber)
+  const expectedParts = Math.ceil(Number(reservation.item?.size ?? 0) / Number(reservation.item?.partSize ?? multipartPartSize))
+  if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > expectedParts) {
+    return response(400, { message: 'Invalid multipart part number.' })
+  }
+
+  const url = await getSignedUrl(
+    s3,
+    new UploadPartCommand({
+      Bucket: requireBucket(),
+      Key: reservation.key,
+      UploadId: reservation.uploadId,
+      PartNumber: partNumber,
+    }),
+    { expiresIn: 60 * 60 },
+  )
+  return response(200, { url, partNumber })
+}
+
+const completeMultipartUpload = async (body: string | undefined, subject: string) => {
+  const input = JSON.parse(body ?? '{}') as MultipartCompleteRequest
+  const reservation = await multipartReservation(input, subject)
+  if (reservation.error) return reservation.error
+
+  const expectedParts = Math.ceil(Number(reservation.item?.size ?? 0) / Number(reservation.item?.partSize ?? multipartPartSize))
+  const parts = (input.parts ?? [])
+    .map((part) => ({ PartNumber: Number(part.partNumber), ETag: String(part.etag ?? '') }))
+    .sort((left, right) => left.PartNumber - right.PartNumber)
+  if (
+    parts.length !== expectedParts
+    || parts.some((part, index) => part.PartNumber !== index + 1 || !part.ETag)
+  ) {
+    return response(400, { message: 'The multipart upload does not contain every expected part.' })
+  }
+
+  try {
+    await s3.send(new CompleteMultipartUploadCommand({
+      Bucket: requireBucket(),
+      Key: reservation.key,
+      UploadId: reservation.uploadId,
+      MultipartUpload: { Parts: parts },
+    }))
+  } catch (error) {
+    if ((error as { name?: string }).name !== 'NoSuchUpload') throw error
+  }
+
+  const object = await s3.send(new HeadObjectCommand({ Bucket: requireBucket(), Key: reservation.key }))
+  if (object.Metadata?.sha256 !== reservation.fingerprint) {
+    return response(409, { message: 'The uploaded file fingerprint could not be verified.' })
+  }
+  if (object.ContentLength !== Number(reservation.item.size)) {
+    return response(409, { message: 'The completed upload size does not match the selected file.' })
+  }
+
+  await dynamodb.send(new UpdateCommand({
+    TableName: requireMetadataTable(),
+    Key: { fingerprint: reservation.fingerprint },
+    UpdateExpression: 'SET #status = :ready, uploadedAt = :uploadedAt, etag = :etag, displayName = if_not_exists(displayName, :displayName), #collection = if_not_exists(#collection, :collection), tags = if_not_exists(tags, :tags), favorite = if_not_exists(favorite, :favorite), caption = if_not_exists(caption, :caption) REMOVE expiresAt, uploadId, uploadMode, partSize',
+    ConditionExpression: '#key = :key AND uploadId = :uploadId',
+    ExpressionAttributeNames: { '#status': 'status', '#key': 'key', '#collection': 'collection' },
+    ExpressionAttributeValues: {
+      ':ready': 'ready',
+      ':uploadedAt': new Date().toISOString(),
+      ':etag': object.ETag ?? '',
+      ':key': reservation.key,
+      ':uploadId': reservation.uploadId,
+      ':displayName': String(object.Metadata?.['original-name'] ?? displayNameFromKey(reservation.key)),
+      ':collection': 'Unsorted uploads',
+      ':tags': [],
+      ':favorite': false,
+      ':caption': '',
+    },
+  }))
+
+  return response(200, { key: reservation.key, fingerprint: reservation.fingerprint })
+}
+
+const abortMultipartUpload = async (body: string | undefined, subject: string) => {
+  const input = JSON.parse(body ?? '{}') as MultipartAbortRequest
+  const reservation = await multipartReservation(input, subject)
+  if (reservation.error) return reservation.error
+
+  await s3.send(new AbortMultipartUploadCommand({
+    Bucket: requireBucket(),
+    Key: reservation.key,
+    UploadId: reservation.uploadId,
+  }))
+  await dynamodb.send(new DeleteCommand({
+    TableName: requireMetadataTable(),
+    Key: { fingerprint: reservation.fingerprint },
+    ConditionExpression: 'uploadId = :uploadId',
+    ExpressionAttributeValues: { ':uploadId': reservation.uploadId },
+  }))
+  return response(200, { aborted: true })
 }
 
 const completeUpload = async (body: string | undefined) => {
@@ -425,6 +721,22 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
     if (route === 'POST /media/upload') {
       const subject = event.requestContext.authorizer?.jwt?.claims.sub ?? 'unknown'
       return await createUpload(event.body, String(subject))
+    }
+    if (route === 'POST /media/upload/multipart') {
+      const subject = event.requestContext.authorizer?.jwt?.claims.sub ?? 'unknown'
+      return await createMultipartUpload(event.body, String(subject))
+    }
+    if (route === 'POST /media/upload/multipart/part') {
+      const subject = event.requestContext.authorizer?.jwt?.claims.sub ?? 'unknown'
+      return await createMultipartPart(event.body, String(subject))
+    }
+    if (route === 'POST /media/upload/multipart/complete') {
+      const subject = event.requestContext.authorizer?.jwt?.claims.sub ?? 'unknown'
+      return await completeMultipartUpload(event.body, String(subject))
+    }
+    if (route === 'POST /media/upload/multipart/abort') {
+      const subject = event.requestContext.authorizer?.jwt?.claims.sub ?? 'unknown'
+      return await abortMultipartUpload(event.body, String(subject))
     }
     if (route === 'POST /media/upload/complete') return await completeUpload(event.body)
     if (route === 'POST /media/trash') return await moveMedia(event.body, false)

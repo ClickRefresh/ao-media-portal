@@ -43,6 +43,7 @@ import {
   trashMedia,
   updateMediaMetadata,
   uploadMedia,
+  type UploadProgress,
 } from './api'
 import { collections, initialMedia, type MediaItem, type MediaKind } from './media'
 import './App.css'
@@ -485,9 +486,11 @@ function App() {
             setUploadOpen(false)
             setSection('Library')
           }}
-          onUpload={async (files, metadata) => {
+          onUpload={async (files, metadata, onProgress) => {
             try {
-              for (const file of files) await uploadMedia(file, metadata)
+              for (const [index, file] of files.entries()) {
+                await uploadMedia(file, metadata, (progress) => onProgress(index, file, progress))
+              }
             } finally {
               await refreshMedia()
             }
@@ -572,7 +575,7 @@ function MetadataModal({ item, collectionNames, saving, onClose, onSave }: { ite
   )
 }
 
-function UploadModal({ connected, collectionNames, onClose, onAdd, onUpload }: { connected: boolean; collectionNames: string[]; onClose: () => void; onAdd: (items: MediaItem[]) => void; onUpload: (files: File[], metadata: { collection: string; tags: string[]; caption: string }) => Promise<void> }) {
+function UploadModal({ connected, collectionNames, onClose, onAdd, onUpload }: { connected: boolean; collectionNames: string[]; onClose: () => void; onAdd: (items: MediaItem[]) => void; onUpload: (files: File[], metadata: { collection: string; tags: string[]; caption: string }, onProgress: (index: number, file: File, progress: UploadProgress) => void) => Promise<void> }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [dragging, setDragging] = useState(false)
@@ -581,6 +584,7 @@ function UploadModal({ connected, collectionNames, onClose, onAdd, onUpload }: {
   const [collection, setCollection] = useState('Unsorted uploads')
   const [tags, setTags] = useState('')
   const [caption, setCaption] = useState('')
+  const [progress, setProgress] = useState<{ index: number; fileName: string; value: UploadProgress } | null>(null)
 
   const addFiles = (incoming: FileList | null) => {
     if (!incoming) return
@@ -606,6 +610,7 @@ function UploadModal({ connected, collectionNames, onClose, onAdd, onUpload }: {
 
   const submitFiles = async () => {
     if (!connected) return addToPreview()
+    setProgress(null)
     setUploading(true)
     setError(null)
     try {
@@ -613,7 +618,7 @@ function UploadModal({ connected, collectionNames, onClose, onAdd, onUpload }: {
         collection: collection.trim() || 'Unsorted uploads',
         tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
         caption: caption.trim(),
-      })
+      }, (index, file, value) => setProgress({ index, fileName: file.name, value }))
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Upload failed.')
       setUploading(false)
@@ -621,9 +626,9 @@ function UploadModal({ connected, collectionNames, onClose, onAdd, onUpload }: {
   }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose() }}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !uploading) onClose() }}>
       <section className="upload-modal" role="dialog" aria-modal="true" aria-labelledby="upload-title">
-        <header><div><span className="eyebrow">Add to library</span><h2 id="upload-title">Upload media</h2></div><button onClick={onClose} aria-label="Close upload"><X /></button></header>
+        <header><div><span className="eyebrow">Add to library</span><h2 id="upload-title">Upload media</h2></div><button onClick={onClose} disabled={uploading} aria-label="Close upload"><X /></button></header>
         <div
           className={`drop-zone ${dragging ? 'dragging' : ''}`}
           onDragOver={(event) => { event.preventDefault(); setDragging(true) }}
@@ -642,6 +647,12 @@ function UploadModal({ connected, collectionNames, onClose, onAdd, onUpload }: {
           <label className="wide"><span>Caption <small>Applied to every selected file</small></span><textarea rows={2} maxLength={1000} value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Optional context or usage notes…" /></label>
         </div>
         {files.length > 0 && <div className="file-queue">{files.map((file, index) => <div key={`${file.name}-${index}`}><FileImage size={17} /><span><strong>{file.name}</strong><small>{Math.max(file.size / 1024 / 1024, 0.1).toFixed(1)} MB</small></span><button onClick={() => setFiles((current) => current.filter((_, fileIndex) => fileIndex !== index))}><X size={16} /></button></div>)}</div>}
+        {progress && (
+          <div className="upload-progress" role="status" aria-live="polite">
+            <div><strong>{progress.value.phase === 'hashing' ? 'Preparing' : progress.value.phase === 'finalizing' ? 'Finalizing' : progress.value.resumed ? 'Resuming' : 'Uploading'} {progress.fileName}</strong><span>File {progress.index + 1} of {files.length} · {progress.value.percent}%</span></div>
+            <progress max="100" value={progress.value.percent}>{progress.value.percent}%</progress>
+          </div>
+        )}
         <div className="upload-note"><ShieldCheck size={17} /><span>{connected ? 'Files upload directly to private S3 storage using a five-minute authorization.' : 'Preview mode keeps selected files in this browser. Configure the media API to enable private S3 uploads.'}</span></div>
         {error && <p className="upload-error">{error}</p>}
         <footer><button className="secondary" onClick={onClose} disabled={uploading}>Cancel</button><button className="primary" disabled={!files.length || uploading} onClick={() => void submitFiles()}>{uploading ? 'Uploading…' : connected ? `Upload ${files.length || ''} file${files.length === 1 ? '' : 's'}` : `Add ${files.length || ''} to preview`}</button></footer>

@@ -1,7 +1,7 @@
 [
   {
     "AllowedHeaders": ["*"],
-    "AllowedMethods": ["GET", "HEAD", "POST"],
+    "AllowedMethods": ["GET", "HEAD", "POST", "PUT"],
     "AllowedOrigins": [
       "https://media.aorafting.net",
       "http://localhost:5173"

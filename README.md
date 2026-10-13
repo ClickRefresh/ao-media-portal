@@ -16,7 +16,8 @@ Private media library for All-Outdoors staff. The portal uses Amazon Cognito for
 - Photo/video grid and list views
 - Search and media-type filters
 - Favorites and multi-select controls
-- Drag-and-drop upload preview
+- Drag-and-drop uploads with duplicate detection
+- Resumable multipart uploads and progress reporting for files 100 MB and larger
 - Cognito OAuth authorization-code flow with PKCE
 - Cognito-protected S3 API for private listings, previews, uploads, and downloads
 - Production-safe configuration gate when Cognito variables are missing
@@ -38,7 +39,13 @@ The API currently provides:
 
 - `GET /media` — lists the first 100 media objects with 15-minute private preview URLs
 - `POST /media/upload` — creates a five-minute presigned S3 POST, limited to the requested file size and supported photo/video content types
+- `POST /media/upload/multipart` — starts or resumes a seven-day multipart upload session
+- `POST /media/upload/multipart/part` — creates a one-hour authorization for one upload part
+- `POST /media/upload/multipart/complete` — assembles and verifies all uploaded parts
+- `POST /media/upload/multipart/abort` — cancels a multipart session and releases its duplicate reservation
 - `GET /media/download?key=...` — creates a five-minute private download URL
+
+Files smaller than 100 MB continue to use a single upload request. Larger files are split into 16 MB parts, upload three parts concurrently, and retry an interrupted part up to four times. If the browser or connection is lost, choosing the same file again within seven days resumes the existing S3 upload instead of being rejected as a duplicate.
 
 ### Deploy
 
@@ -48,6 +55,7 @@ The API currently provides:
 4. Run `sam deploy --guided` and review the IAM changeset before approving it.
 5. Copy the `MediaApiUrl` stack output into `VITE_API_BASE_URL` in the frontend environment.
 6. Apply `backend/s3-cors.json` to the bucket's **Permissions → Cross-origin resource sharing (CORS)** setting.
+7. In the bucket's **Management → Lifecycle rules**, add a rule that deletes incomplete multipart uploads after seven days. This prevents abandoned parts from accumulating storage charges; it does not delete completed media.
 
 The current production API stack is `ao-media-portal-api-prod`, with endpoint `https://prdd7g3j20.execute-api.us-west-2.amazonaws.com`.
 
